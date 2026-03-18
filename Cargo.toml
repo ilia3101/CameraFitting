@@ -1,0 +1,14 @@
+[workspace]
+
+resolver = "2"
+
+members = [
+    "camera_fitting",
+    "maths",
+    "optimisation",
+    "colour",
+    "utils",
+]
+
+[profile.release]
+panic = "abort"
