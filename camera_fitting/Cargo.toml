@@ -11,3 +11,12 @@ colour = { path = "../colour" }
 optimisation = { path = "../optimisation" }
 utils = { path = "../utils" }
 plotters = "0.3"
+
+fast-srgb8 = { version = "1.0.0", optional = true }
+rawloader = { version = "*", optional = true }
+image_lib = { package = "image", version = "*", optional = true }
+
+
+[features]
+default = ["raw_demo"]
+raw_demo = ["dep:rawloader", "dep:image_lib", "dep:fast-srgb8"]

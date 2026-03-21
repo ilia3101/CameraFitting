@@ -1,7 +1,7 @@
 #![allow(dead_code, unused_variables, unused_imports, unused_mut, unused_parens)]
 
 use camera_fitting::{
-    CameraTransform,
+    CameraTransform, MatrixTransform,
     root_polynomial::{Rpcc2, Rpcc3, Rpcc4},
     utility_transforms::Gained,
 };
@@ -204,30 +204,6 @@ where
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct MatrixTransform<T> {
-    pub matrix: Matrix3x3<T>,
-}
-
-impl<A> Mappable<A> for MatrixTransform<A> {
-    type Wrapped<B> = MatrixTransform<B>;
-    #[inline]
-    fn fmap<F, B>(self, f: F) -> MatrixTransform<B>
-    where
-        F: FnMut(A) -> B,
-    {
-        MatrixTransform {
-            matrix: self.matrix.fmap(f),
-        }
-    }
-}
-
-impl<T: Float> CameraTransform<T> for MatrixTransform<T> {
-    fn apply(&self, rgb: Vector<T, 3>) -> Vector<T, 3> {
-        self.matrix * rgb
-    }
-}
-
 const SPECTRAL_MEASUREMENTS_PATH: &'static str = "/Users/ilia/Sync/SpectralMeasurements";
 
 pub fn main() {
@@ -253,10 +229,6 @@ pub fn main() {
 
     let mut all_reflectances = vec![];
     all_reflectances.append(&mut iso_reflectances.clone());
-    // all_reflectances
-    //     .append(&mut load_spotread_spectra(
-    //         "colour/spectral_data/my_reflectance_measurements/*.txt",
-    //     ));
 
     /* Illuminant */
     let illuminant_path = "colour/spectral_data/illuminants/CIE_std_illum_D50.csv";
@@ -311,6 +283,47 @@ pub fn main() {
     all_spectra.append(&mut sharp_spectral);
     all_spectra.append(&mut medium_spectral);
     all_spectra.append(&mut soft_spectral);
+
+    /* Generate a red-blue gradient for smooth luminance in that region */
+    let redblue_steps = 15;
+    let rb_to_white_steps = 8;
+    let max_rb_white = 0.4;
+    let reblue_weight = 15.0;
+    let bluelight: SpectrumT<f64> = GaussianSpectrum {
+        cwl: 470.,
+        fwhm: 12.0,
+    }
+    .discretise()
+    .normalise_area(reblue_weight);
+    let redlight: SpectrumT<f64> = GaussianSpectrum {
+        cwl: 630.,
+        fwhm: 12.0,
+    }
+    .discretise()
+    .normalise_area(reblue_weight);
+    let whitelight = illuminant.normalise_area(1.0);
+    let mut redblue = (0..redblue_steps)
+        .map(|step| {
+            let a = (step as f64 / (redblue_steps - 1) as f64);
+            return bluelight * a + redlight * (1.0 - a);
+        })
+        .collect::<Vec<_>>();
+    // also blend to white
+    let with_white = (0..rb_to_white_steps)
+        .map(|step| {
+            let a = (step as f64 / (redblue_steps - 1) as f64) * max_rb_white;
+            redblue
+                .iter()
+                .map(|rbspectrum| {
+                    return (whitelight * a + *rbspectrum * (1.0 - a)) / rb_to_white_steps as f64;
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+
+    all_spectra.append(&mut redblue);
 
     println!(
         "{:?}",
