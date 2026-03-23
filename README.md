@@ -14,10 +14,13 @@ cargo run --release --bin camera_fitting  "colour/spectral_data/old_camera_measu
 
 - Improve hue correctness over poor 3x3 matrix profiles
 - Fix negative luminance/extreme values
+- Find out if non-linear camera colour correction methods can be smooth (promising)
 
 ## Example
 
-Using the run_on_image binary, I generated the following outputs from this image: . The difference is not immediately apparent in the processed image due to AgX processing which handles strong colours effecively, but if you look closely you will see much smoother colour transitions on the RPCC image, particularly where shadows and colours intersect. The difference is most clear in the Luminance channel of course!
+Using the run_on_image binary, I generated the following outputs using this image - [5D3_9253.CR2](https://github.com/user-attachments/files/26196750/5D3_9253.CR2.zip).
+
+The difference is not immediately apparent in the processed image due to AgX processing which handles strong colours effecively, but if you look closely you will see much smoother colour transitions on the RPCC image, particularly where shadows and colours intersect. The difference is most clear in the Luminance channel of course!
 
 |profile type|Processed image (AgX)|Luminance channel (Y)|
 |-|-|-|
