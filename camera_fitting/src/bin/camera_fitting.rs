@@ -14,6 +14,7 @@ use optimisation::{
     parameters::{Parametric, ToParameters},
     traits::CalculateResiduals,
 };
+use std::fs;
 use std::fs::read_to_string;
 use std::marker::PhantomData;
 use utils::file::{get_cols, load_file_split_lines_map, split_lines_map};
@@ -118,7 +119,7 @@ fn normalise_spectra(data: &mut [SpectrumT<f64>], to_area: f64) -> &mut [Spectru
     return data;
 }
 
-fn load_all_iso_spectra(base_path: &str) -> Vec<SpectrumT<f64>> {
+fn load_iso_refl(base_path: &str) -> Vec<SpectrumT<f64>> {
     let num_spectra = 14079;
     let mut results = vec![];
     for i in 0..=num_spectra {
@@ -206,42 +207,67 @@ where
 
 const SPECTRAL_MEASUREMENTS_PATH: &'static str = "/Users/ilia/Sync/SpectralMeasurements";
 
-pub fn main() {
-    let args: Vec<String> = std::env::args().collect();
+// sums all energy in all spectra in given slice
+fn total_energy(data: &[SpectrumT<f64>]) -> f64 {
+    let mut sum = 0.0;
+    for &spectrum in data {
+        sum += spectrum.sum()
+    }
+    sum
+}
 
-    // First argument after program name is the observer camera path
-    let observer_camera_path = if args.len() > 1 {
-        &args[1]
-    } else {
-        eprintln!("Usage: {} <camera_response_path>", args[0]);
-        std::process::exit(1);
-    };
+fn generate_colours(camera: Camera<f64>, illuminant: SpectrumT<f64>) -> Vec<Vector<f64, 3>> {
+    // TODO: Add weighting, maybe by making everything a tuple with a weight parameter. For now,
+    // weighting is implemented using multipliers as minimsation is done in linear space anyway.
 
-    // This is the 2006 2 degree CMF, also known by other names such as CIE 2015
-    let cmf = load_response("colour/spectral_data/cmf/lin2012xyz2e_1_7sf.csv", ",");
+    /* Weight multipliers */
+    let iso_weight = 1.0;
+    let my_spectra_weight = 1.0;
+    let locus_weight = 1.0;
+    let redblue_weight = 30.0 / 10.0;
 
-    let observer_camera = load_response(observer_camera_path, " ");
+    /************* Load reflectance datasets *************/
 
-    // Load spectral reflectances
-    let mut iso_reflectances = load_all_iso_spectra(&format!(
+    /* Load ISO reflectance data */
+    let mut iso_refl = load_iso_refl(&format!(
         "{SPECTRAL_MEASUREMENTS_PATH}/Data/Spectra/ReflectanceISO"
     ));
 
-    let mut all_reflectances = vec![];
-    all_reflectances.append(&mut iso_reflectances.clone());
+    /* Load my own data (if it's there) */
+    let mut my_reflectances = vec![];
+    if let Ok(dir) = fs::read_dir(
+        "/Users/ilia/Sync/learning-rust/colour/spectral_data/my_reflectance_measurements/",
+    ) {
+        for p in dir.filter_map(|e| {
+            e.ok()
+                .filter(|p| p.path().extension().map(|e| e == "txt").unwrap_or(false))
+        }) {
+            my_reflectances.append(&mut load_spotread_spectra(&p.path().to_string_lossy()));
+        }
+    }
 
-    /* Illuminant */
-    let illuminant_path = "colour/spectral_data/illuminants/CIE_std_illum_D50.csv";
-    // let illuminant_path = "colour/spectral_data/illuminants/CIE_std_illum_A_1nm.csv";
+    /******** Load/generate non-reflectance spectra (emission) *********/
 
-    let illuminant = load_spectrum_iso(illuminant_path, ",").normalise().unwrap();
+    // /* 1. Locus spectra */
+    // let locus_min = 433.0;
+    // let locus_max = 644.0;
+    // let locus_steps = 212;
+    // let locus_weight = 212.0 * 3.0;
+    // let mut locus_spectra = vec![];
+    // let locus_fwhm_bands = [10.0, 20.0, 50.0];
 
-    // apply illuminant to reflactrances
-    let mut all_spectra = all_reflectances
-        .into_iter()
-        .map(|refl| refl * illuminant)
-        .collect::<Vec<_>>();
+    // for i in 0..locus_steps {
+    //     let a = i as f64 / (locus_steps - 1) as f64;
+    //     let wl = locus_min + (locus_max - locus_min) * a;
+    //     let area = locus_weight / (locus_steps * locus_fwhm_bands.len()) as f64;
+    //     for fwhm in locus_fwhm_bands {
+    //         locus_spectra.push(GaussianSpectrum { cwl: wl, fwhm: 10.0 }.discretise().normalise_area(1.0))
+    //     }
+    // }
 
+    // normalise_spectra(&mut locus_spectra, 0.25);
+
+    let mut locus_spectra = vec![];
     // add spectral locus data to keep the locus in check when optimising, with different levels of gaussian shapes...
     let mut sharp_spectral = (433..645)
         .map(|wl| {
@@ -253,7 +279,6 @@ pub fn main() {
             .normalise_area(1.0)
         })
         .collect::<Vec<_>>();
-
     let mut medium_spectral = (433..645)
         .map(|wl| {
             GaussianSpectrum {
@@ -264,7 +289,6 @@ pub fn main() {
             .normalise_area(1.0)
         })
         .collect::<Vec<_>>();
-
     let mut soft_spectral = (433..645)
         .map(|wl| {
             GaussianSpectrum {
@@ -280,72 +304,95 @@ pub fn main() {
     normalise_spectra(&mut medium_spectral, 0.25);
     normalise_spectra(&mut soft_spectral, 0.25);
 
-    all_spectra.append(&mut sharp_spectral);
-    all_spectra.append(&mut medium_spectral);
-    all_spectra.append(&mut soft_spectral);
+    locus_spectra.append(&mut sharp_spectral);
+    locus_spectra.append(&mut medium_spectral);
+    locus_spectra.append(&mut soft_spectral);
 
-    /* Generate a red-blue gradient for smooth luminance in that region */
-    let redblue_steps = 15;
-    let rb_to_white_steps = 8;
-    let max_rb_white = 0.4;
-    let reblue_weight = 15.0;
-    let bluelight: SpectrumT<f64> = GaussianSpectrum {
-        cwl: 470.,
-        fwhm: 12.0,
-    }
-    .discretise()
-    .normalise_area(reblue_weight);
-    let redlight: SpectrumT<f64> = GaussianSpectrum {
-        cwl: 630.,
-        fwhm: 12.0,
-    }
-    .discretise()
-    .normalise_area(reblue_weight);
-    let whitelight = illuminant.normalise_area(1.0);
-    let mut redblue = (0..redblue_steps)
-        .map(|step| {
-            let a = (step as f64 / (redblue_steps - 1) as f64);
-            return bluelight * a + redlight * (1.0 - a);
-        })
-        .collect::<Vec<_>>();
-    // also blend to white
-    let with_white = (0..rb_to_white_steps)
-        .map(|step| {
-            let a = (step as f64 / (redblue_steps - 1) as f64) * max_rb_white;
-            redblue
-                .iter()
-                .map(|rbspectrum| {
-                    return (whitelight * a + *rbspectrum * (1.0 - a)) / rb_to_white_steps as f64;
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-        })
-        .flatten()
-        .collect::<Vec<_>>();
+    /* 2. [blue-red]->white gradients, for smooth blue/red LED shadow and light transition rendering */
 
-    all_spectra.append(&mut redblue);
-
-    println!(
-        "{:?}",
-        observer_camera.integrate(SpectrumT::<f64>::from_fn(|_wl| 1.0))
-    );
-    println!("{:?}", cmf.integrate(SpectrumT::<f64>::from_fn(|_wl| 1.0)));
-
-    println!("Camera:");
-    observer_camera.print_peak_values();
-
-    println!("Human LMS");
-    cmf.print_peak_values();
-
-    let mut cam_rgb = all_spectra
+    let led_spectrum = |cwl: f64, fwhm: f64| -> SpectrumT<f64> {
+        GaussianSpectrum { cwl, fwhm }
+            .discretise()
+            .normalise_area(1.0)
+    };
+    // TODO: use actual spectra from real led measurements
+    let led_fwhm = 12.0;
+    let led_pairs = [(465.0, 630.0)];
+    let led_pairs_spectra = led_pairs
         .iter()
-        .map(|&spectrum| observer_camera.integrate(spectrum))
+        .map(|&(a, b)| (led_spectrum(a, led_fwhm), led_spectrum(b, led_fwhm)))
         .collect::<Vec<_>>();
-
-    let mut cmf_lms = all_spectra
+    // let led_pairs_spectra = [(
+    //     load_spotread_spectra("/Users/ilia/Sync/learning-rust/colour/spectral_data/leds/ulanzi_rgb/blue.tsv")[0]
+    //         .normalise_area(1.5),
+    //     load_spotread_spectra("/Users/ilia/Sync/learning-rust/colour/spectral_data/leds/ulanzi_rgb/red.tsv")[0]
+    //         .normalise_area(0.5),
+    // )];
+    let led_pairs_integrated = led_pairs_spectra
         .iter()
-        .map(|&spectrum| cmf.integrate(spectrum))
+        .map(|&(a, b)| (camera.integrate(a), camera.integrate(b)))
         .collect::<Vec<_>>();
+    let w_integrated = camera.integrate(illuminant.normalise_area(1.0));
+    let colour_steps = 150;
+    let steps_to_white = 80;
+    let max_white = 0.4;
+
+    let mut gradient_rb = vec![];
+
+    for rb_a in (0..colour_steps).map(|i| (i as f64 / (colour_steps - 1) as f64)) {
+        for w_a in (0..steps_to_white).map(|i| (i as f64 / (steps_to_white - 1) as f64)) {
+            for &(r, b) in led_pairs_integrated.iter() {
+                gradient_rb.push(
+                    (w_integrated * w_a + (r * rb_a + b * (1.0 - rb_a)) * (1.0 - w_a))
+                        * redblue_weight,
+                )
+            }
+        }
+    }
+
+    /************** Integrate all spectra **************/
+
+    /* Reflectance */
+    let mut iso_integrated = iso_refl
+        .iter()
+        .map(|&s| camera.integrate(s * illuminant) * iso_weight);
+    let mut my_integrated = my_reflectances
+        .iter()
+        .map(|&s| camera.integrate(s * illuminant) * my_spectra_weight);
+    let mut locus_integrated = locus_spectra
+        .iter()
+        .map(|&s| camera.integrate(s) * locus_weight);
+
+    iso_integrated
+        .chain(my_integrated)
+        .chain(locus_integrated)
+        .chain(gradient_rb.into_iter())
+        .collect()
+}
+
+pub fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    // First argument after program name is the observer camera path
+    let camera_response_path = if args.len() > 1 {
+        &args[1]
+    } else {
+        eprintln!("Usage: {} <camera_response_path>", args[0]);
+        std::process::exit(1);
+    };
+
+    // This is the 2006 2 degree CMF, also known by other names such as CIE 2015
+    let target_cmf = load_response("colour/spectral_data/cmf/lin2012xyz2e_1_7sf.csv", ",");
+    let camera_response = load_response(camera_response_path, " ");
+
+    /* Illuminant */
+    let illuminant_path = "colour/spectral_data/illuminants/CIE_std_illum_D50.csv";
+    // let illuminant_path = "colour/spectral_data/illuminants/CIE_std_illum_A_1nm.csv";
+    let illuminant = load_spectrum_iso(illuminant_path, ",").normalise().unwrap();
+
+    let mut cam_rgb = generate_colours(camera_response.clone(), illuminant);
+    let mut cmf_lms = generate_colours(target_cmf.clone(), illuminant);
+    println!("Cam len new = {}", cam_rgb.len());
 
     let cam_rgb_avg = cam_rgb.iter().map(|x| x.magnitude()).sum::<f64>() / cam_rgb.len() as f64;
     let cmf_lms_avg = cmf_lms.iter().map(|x| x.magnitude()).sum::<f64>() / cmf_lms.len() as f64;
@@ -354,7 +401,7 @@ pub fn main() {
         *lms = *lms / cmf_lms_avg;
     }
 
-    // pairs of in/out
+    // pairs of in/outx
     let inoutpairs: Vec<InOutPair<_>> = cam_rgb
         .iter()
         .zip(cmf_lms.iter())
@@ -368,14 +415,14 @@ pub fn main() {
         },
     };
     let transform_parametric = transform.to_pars_unlocked();
-    let refined = transform_parametric.refine(&inoutpairs, 0.3, 300).unwrap();
+    let refined = transform_parametric.refine(&inoutpairs, 1.0, 10).unwrap();
     println!("{:?}", refined.fmap(|x| x.value));
     println!(
         "Cam matrix: {:?}\n",
         refined.fmap(|x| x.value).transform.matrix.invert3x3()
     );
 
-    let illuminant_cam_rgb = observer_camera.integrate(illuminant).normalised();
+    let illuminant_cam_rgb = camera_response.integrate(illuminant).normalised();
     let gain = (illuminant_cam_rgb / illuminant_cam_rgb.magnitude()).map(|x| 1.0 / x);
 
     /* RPCC2 */
@@ -387,7 +434,7 @@ pub fn main() {
     };
     let mut transform_parametric = transform.to_pars_unlocked();
     transform_parametric.transform.gain.lock();
-    let refined2 = transform_parametric.refine(&inoutpairs, 0.05, 300).unwrap();
+    let refined2 = transform_parametric.refine(&inoutpairs, 1.0, 4).unwrap();
     println!("{:?}\n", refined2.fmap(|x| x.value));
 
     /* RPCC3 */
@@ -396,9 +443,7 @@ pub fn main() {
     };
     let mut transform_parametric = transform.to_pars_unlocked();
     transform_parametric.transform.gain.lock();
-    let refined3 = transform_parametric
-        .refine(&inoutpairs, 0.025, 100)
-        .unwrap();
+    let refined3 = transform_parametric.refine(&inoutpairs, 1.0, 4).unwrap();
     println!("{:?}\n", refined3.fmap(|x| x.value));
 
     /* RPCC4 */
@@ -407,7 +452,7 @@ pub fn main() {
     };
     let mut transform_parametric = transform.to_pars_unlocked();
     transform_parametric.transform.gain.lock();
-    let refined4 = transform_parametric.refine(&inoutpairs, 0.02, 10).unwrap();
+    let refined4 = transform_parametric.refine(&inoutpairs, 1.0, 8).unwrap();
     println!("{:?}\n", refined4.fmap(|x| x.value));
 
     // Plot spectral locus in xy chromaticity
@@ -443,12 +488,15 @@ pub fn main() {
     };
 
     // True XYZ locus
-    let cmf_locus: Vec<_> = spikes.iter().map(|s| to_xy(cmf.integrate(*s))).collect();
+    let cmf_locus: Vec<_> = spikes
+        .iter()
+        .map(|s| to_xy(target_cmf.integrate(*s)))
+        .collect();
 
     // Camera loci through each fitted transform
     let cam_rgb_spikes: Vec<_> = spikes
         .iter()
-        .map(|s| observer_camera.integrate(*s) / cam_rgb_avg)
+        .map(|s| camera_response.integrate(*s) / cam_rgb_avg)
         .collect();
     let locus_matrix: Vec<_> = cam_rgb_spikes
         .iter()
